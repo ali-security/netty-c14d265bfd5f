@@ -1,0 +1,80 @@
+name: seal-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Surefire -Dtest selector; empty runs the full epoll + unix-common suite"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      MAVEN_OPTS: -Xmx2g
+      MVN_FLAGS: -B -ntp -Pboringssl -Dio.netty.testsuite.badHost=netty.io -Dcheckstyle.skip=true -DskipJapicmp=true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 8 (netty 4.1 requires JDK 1.8 to build, targets Java 6)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+          cache: maven
+
+      - name: Install native toolchain (autotools for hawtjni / unix-common)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool make gcc
+
+      - name: Install reactor dependencies of transport-native-epoll
+        run: ./mvnw $MVN_FLAGS install -pl transport-native-epoll -am -DskipTests
+
+      - name: Build and test transport-native-unix-common and transport-native-epoll
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            ./mvnw $MVN_FLAGS install -pl transport-native-unix-common,transport-native-unix-common-tests,transport-native-epoll -Dtest='${{ inputs.test-filter }}' -DfailIfNoTests=false
+          else
+            ./mvnw $MVN_FLAGS install -pl transport-native-unix-common,transport-native-unix-common-tests,transport-native-epoll
+          fi
+
+      - name: Print skipped tests with reasons
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import glob, re, xml.etree.ElementTree as ET
+          def ignore_reason(cls, name):
+              # Surefire records an @Ignore without a value as an empty skip; quote the
+              # annotation line (with its upstream comment) from the test source instead.
+              for src in glob.glob('*/src/test/java/' + cls.replace('.', '/') + '.java'):
+                  lines = open(src).read().splitlines()
+                  for i, l in enumerate(lines):
+                      if re.search(r'void\s+' + re.escape(name.split('[')[0]) + r'\s*\(', l):
+                          for prev in reversed(lines[max(0, i - 4):i]):
+                              if '@Ignore' in prev:
+                                  return 'upstream ' + prev.strip()
+              return 'no message'
+          total = 0
+          for f in sorted(glob.glob('transport-native-*/target/surefire-reports/TEST-*.xml')):
+              for tc in ET.parse(f).getroot().iter('testcase'):
+                  sk = tc.find('skipped')
+                  if sk is not None:
+                      total += 1
+                      reason = sk.get('message') or (sk.text or '').strip() or ignore_reason(tc.get('classname'), tc.get('name'))
+                      print("SKIPPED: %s.%s -- %s" % (tc.get('classname'), tc.get('name'), reason))
+          print("Total skipped tests: %d" % total)
+          EOF
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: netty-transport-native-epoll
+          if-no-files-found: error
+          path: |
+            transport-native-epoll/target/netty-transport-native-epoll-*.jar
+            !transport-native-epoll/target/netty-transport-native-epoll-*-sources.jar
+            !transport-native-epoll/target/netty-transport-native-epoll-*-javadoc.jar
+            !transport-native-epoll/target/netty-transport-native-epoll-*-test-sources.jar

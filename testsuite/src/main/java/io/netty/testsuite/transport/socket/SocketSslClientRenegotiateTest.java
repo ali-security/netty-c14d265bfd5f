@@ -131,8 +131,9 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
     @Test(timeout = 30000)
     public void testSslRenegotiationRejected() throws Throwable {
         // BoringSSL does not support renegotiation intentionally.
-        Assume.assumeFalse("BoringSSL".equals(OpenSsl.versionString()));
-        Assume.assumeTrue(OpenSsl.isAvailable());
+        Assume.assumeFalse("BoringSSL does not support renegotiation intentionally",
+                "BoringSSL".equals(OpenSsl.versionString()));
+        Assume.assumeTrue("OpenSSL (netty-tcnative) is not available", OpenSsl.isAvailable());
         run();
     }
 
